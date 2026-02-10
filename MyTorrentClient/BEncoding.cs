@@ -138,5 +138,36 @@ namespace BitTorrent
 
             return dict;
         }
+
+        //Encoding
+        public static byte[] Encode(object obj)
+        {
+            MemoryStream buffer = new MemoryStream();
+
+            EncodeNextObject(buffer, obj);
+
+            return buffer.ToArray();
+        }
+
+        public static void EncodeToFile(object obj, string path)
+        {
+            File.WriteAllBytes(path, Encode(obj));
+        }
+
+        private static void EncodeNextObject(MemoryStream buffer, object obj)
+        {
+            if (obj is byte[])
+                EncodeByteArray(buffer, (byte[])obj);
+            else if (obj is string)
+                EncodeString(buffer, (string)obj);
+            else if (obj is long)
+                EncodeNumber(buffer, (long)obj);
+            else if (obj.GetType() == typeof(List<object>))
+                EncodeList(buffer, (List<object>)obj);
+            else if (obj.GetType() == typeof(Dictionary<string, object>))
+                EncodeDictionary(buffer, (Dictionary<string, object>)obj);
+            else
+                throw new Exception("Unable to Encode: " + object.GetTypre());
+        }
     }
 }
