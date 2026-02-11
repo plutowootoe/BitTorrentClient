@@ -169,5 +169,52 @@ namespace BitTorrent
             else
                 throw new Exception("Unable to Encode: " + object.GetTypre());
         }
+
+        // encode numbers
+        private static void EncodeNumber(MemoryStream buffer, long input)
+        {
+            buffer.Append(NumberStart);
+            buffer.Append(Encoding.UTF8.GetBytes(Convert.ToString(input)));
+            buffer.Append(NumberEnd);
+        }
+
+        // encode byte arrys & strings
+        private static void EncodeByteArray(MemoryStream buffer, byte[] body)
+        {
+            buffer.Append(Encoding.UTF8.GetBytes(Convert.ToString(body.Length)));
+            buffer.Append(ByteArrayDivider);
+            buffer.Append(body);
+        }
+
+        private static void EncodeString(MemoryStream buffer, string input)
+        {
+            EncodeByteArray(buffer, Encoding.UTF8.GetBytes(input));
+        }
+
+        // encoding lists
+        private static void EncodeList(MemoryStream buffer, List<object> input)
+        {
+            buffer.Append(ListStart);
+            foreach (var item in input)
+                EncodeNextObject(buffer, item);
+            buffer.Append(ListEnd);
+        }
+
+        //encoding Dictionarys
+        private static void EncodeDictionary(MemoryStream buffer, Dictionary<string, object> input)
+        {
+            buffer.Append(DictionaryStart);
+
+            // sorting keys by raw bytes
+            var sortedKeys = input.Keys.ToList().OrderyBy(x => BitConverter.ToString(Encoding.UTF8.GetBytes(x)));
+
+            foreach (var key in sortedKeys)
+            {
+                EncodeString(buffer, key);
+                EncodeNextObject(buffer, input[key]);
+            }
+
+            buffer.Append(DictionaryEnd);
+        }
     }
 }
