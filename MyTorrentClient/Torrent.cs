@@ -18,7 +18,7 @@ namespace BitTorrent
         public string FileDirectory { get { return (Files.Count > 1 ? Name + Path.DirectorySeparatorChar : ""); } }
         public string DownloadDirectory { get; private set; }
 
-        public List<Tracker> Trackers { get; } = new List<Tracker>();
+        public List<Tracker> Trackers { get; } = [];
         public string Comment { get; set; }
         public string CreatedBy { get; set; }
         public DateTime CreationDate { get; set; }
@@ -50,7 +50,7 @@ namespace BitTorrent
 
         public byte[] InfoHash { get; private set; } = new byte[20];
         public string HexStringInfoHash { get { return String.Join("", this.InfoHash.Select(x => x.ToString("x2"))); } }
-        public string UrlSafeStringInfoHash { get { return Encoding.UTF8.GetString(WedUtility.UrlEncodeToBytes(this.InfoHash, 0, 20)); } }
+        public string UrlSafeStringInfoHash { get { return Encoding.UTF8.GetString(WebUtility.UrlEncodeToBytes(this.InfoHash, 0, 20)); } }
 
 
         public int GetPieceSize(int piece)
@@ -84,8 +84,8 @@ namespace BitTorrent
 
         public event EventHandler<List<IPEndPoint>> PeerListUpdated;
 
-        private object[] fileWriteLocks;
-        private static SHA1 sha1 = SHA1.Create();
+        private readonly object[] fileWriteLocks;
+        private static readonly SHA1 sha1 = SHA1.Create();
 
         public Torrent(string name, string location, List<FileItem> files, List<string> trackers, int pieceSize, byte[] pieceHashes = null, int blockSize = 16384, bool? isPrivate = false)
         {
@@ -102,7 +102,7 @@ namespace BitTorrent
                 {
                     Tracker tracker = new Tracker(url);
                     Trackers.Add(tracker);
-                    tracker.PeerListUpdated = +HandlePeerListUpdated;
+                    tracker.PeerListUpdated += HandlePeerListUpdated;
                 }
             }
 
@@ -131,14 +131,138 @@ namespace BitTorrent
 
             object info = TorrentInfoToBEncodingObject(this);
             byte[] bytes = BEncoding.Encode(info);
-            InfoHash = SHA1.Create().ComputeHash(bytes);
+            InfoHash = SHA1.HashData(bytes);
 
             for (int i = 0; i < PieceCount; i++)
                 Verify(i);
         }
 
+        // reading files
+        public byte[] Read(long start, int length)
+        {
+            long end = start + length;
+            byte[] buffer = new byte[length];
+
+            for (int i = 0; i < Files.Count; i++)
+            {
+                if ((start < Files[i].Offset && end < Files[i].Offset) || (start > Files[i].Offset + Files[i].Size && end > Files[i].Offset + Files[i].Size))
+                    continue;
+
+                string filePath = DownloadDirectory + Path.DirectorySeparatorChar + FileDirectory + Files[i].Path;
+
+                if (!File.Exists(filePath))
+                    return null;
+
+                long fstart = Math.Max(0, start - Files[i].Offset);
+                long fend = Math.Min(end - Files[i].Offset, Files[i].Size);
+                int bstart = Math.Max(0, Convert.ToInt32(Files[i].Offset - start));
+                int flength = Convert.ToInt32(fend - fstart);
+
+                using (Stream stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    stream.Seek(fstart, SeekOrigin.Begin);
+                    int bytesRead = 0;
+                    while (bytesRead < flength)
+                    {
+                        int read = stream.Read(buffer, bstart + bytesRead, flength - bytesRead);
+                        if (read == 0)
+                            throw new EndOfStreamException("Unexpected end of stream while reading.");
+                        bytesRead += read;
+                    }
+                }
+            }
+            return buffer;
+        }
+        // write torrent
+        public void Write(long start, byte[] bytes)
+        {
+            long end = start + bytes.Length;
+            for (int i = 0; i < Files.Count; i++)
+            {
+                if ((start < Files[i].Offset && end < Files[i].Offset) || (start > Files[i].Offset + Files[i].Size && end > Files[i].Offset + Files[i].Size))
+                    continue;
+
+                string filePath = DownloadDirectory + Path.DirectorySeparatorChar + FileDirectory + Files[i].Path;
+
+                string dir = Path.GetDirectoryName(filePath);
+                if (!Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+
+                lock (fileWriteLocks[i])
+                {
+                    using (Stream stream = new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite))
+                    {
+                        long fstart = Math.Max(0, start - Files[i].Offset);
+                        long fend = Math.Min(end - Files[i].Offset, Files[i].Size);
+                        int flength = Convert.ToInt32(fend - fstart);
+                        int bstart = Math.Max(0, Convert.ToInt32(Files[i].Offset - start));
+
+                        stream.Seek(fstart, SeekOrigin.Begin);
+                        stream.Write(bytes, bstart, flength);
+                    }
+                }
+            }
+        }
+
+        public byte[] ReadPiece(int piece)
+        {
+            return Read(piece * PieceSize, GetPieceSize(piece));
+        }
+
+        public byte[] ReadBlock(int piece, int offset, int length)
+        {
+            return Read(piece * PieceSize + offset, length);
+        }
+
+        public void WriteBlock(int piece, int block, byte[] bytes)
+        {
+            Write(piece * PieceSize + block * BlockSize, bytes);
+            IsBlockAcquired[piece][block] = true;
+            Verify(piece);
+        }
 
 
 
+        // verify blocks
+        public event EventHandler<int> PieceVerified;
+
+        public void Verify(int piece)
+        {
+            byte[] hash = GetHashCode(piece);
+            bool isVerified = (hash != null && hash.SequenceEqual(PieceHashes[piece]));
+
+            if (isVerified)
+            {
+                IsPieceVerified[piece] = true;
+
+                for (int j = 0; j < IsBlockAcquired[piece].Length; j++)
+                    IsBlockAcquired[piece][j] = true;
+
+                var handler = PieceVerified;
+                if (handler != null)
+                    handler(this, piece);
+
+                return;
+            }
+
+            IsPieceVerified[piece] = false;
+
+            // reload entire piece
+            if (IsBlockAcquired.All(x => x))
+            {
+                for (int j = 0; j < IsBlockAcquired[piece].Length; j++)
+                    IsBlockAcquired[piece][j] = false;
+            }
+        }
+
+        public byte[] GetHash(int piece)
+        {
+            byte[] data = ReadPiece(piece);
+
+            if (data == null)
+                return null;
+
+            return sha1.ComputeHash(data);
+        }
     }
 }
