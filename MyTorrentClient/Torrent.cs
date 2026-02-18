@@ -7,6 +7,8 @@ using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.IO;
 using System.Net;
+using System.Security.Cryptography.X509Certificates;
+using System.Drawing;
 
 namespace BitTorrent
 {
@@ -263,6 +265,189 @@ namespace BitTorrent
                 return null;
 
             return sha1.ComputeHash(data);
+        }
+
+        // import and exporting torrents
+        public static Torrent LoadFromFile(string filePath, string downloadPath)
+        {
+            object obj = BEncoding.DecodeFile(filePath);
+            string name = Path.GetFileNameWithoutExtension(filePath);
+
+            return BEncodingObjectToTorrent(obj, name, downloadPath);
+        }
+
+        public static void SaveToFile(Torrent torrent)
+        {
+            object obj = TorrentToBEncodingObject(torrent);
+
+            BEncoding.EncodeToFile(obj, torrent.Name + ".torrent");
+        }
+
+        public static long DateTimeToUnixTimestamp(DateTime time)
+        {
+            DateTime utcTime = time.ToUniversalTime();
+            return Convert.ToInt64((utcTime.Subtract(new DateTime(1970, 1, 1))).TotalSeconds);
+        }
+
+        private static object TorrentInfoToBEncodingObject(Torrent torrent)
+        {
+            Dictionary<string, object> dict = new Dictionary<string, object>();
+
+            if (torrent.Trackers.Count == 1)
+                dict["announce"] = Encoding.UTF8.GetBytes(torrent.Trackers[0].Address);
+
+            else
+                dict["announce"] = torrent.Trackers.Select(x => (object)Encoding.UTF8.GetBytes(x.Address)).ToList();
+            dict["comment"] = Encoding.UTF8.GetBytes(torrent.Comment);
+            dict["created by"] = Encoding.UTF8.GetBytes(torrent.CreatedBy);
+            dict["creation date"] = DateTimeToUnixTimestamp(torrent.CreationDate);
+            dict["encoding"] = Encoding.UTF8.GetBytes(Encoding.UTF8.WebName.ToUpper());
+            dict["info"] = TorrentInfoToBEncodingObject(torrent);
+
+            return dict;
+        }
+
+        // torrent info to bencoding
+        private static object TorrentInfoToBEncodingObject(Torrent torrent)
+        {
+            Dictionary<string, object> dict = new Dictionary<string, object>();
+
+            dict["piece length"] = (long)torrent.PieceSize;
+            byte[] pieces = new byte[20 * torrent.PieceCount];
+            for(int i = 0; i < torrent.PieceCount; i++)
+                Buffer.BlockCopy(torrent.PieceHashes[i],0,pieces,i * 20, 20);
+            dict["pieces"] = pieces;
+
+            if (torrent.IsPrivate.HasValue)
+                dict["private"] = torrent.IsPrivate.Value ? 1L : 0L;
+            
+            if(torrent.Files.Count == 1)
+            {
+                dict["name"] = Encoding.UTF8.GetBytes(torrent.Files[0].Path);
+                dict["length"] = torrent.Files[0].Size;
+            }
+
+            else
+            {
+                List<object> files = new List<object>();
+
+                foreach ( var f in torrent.Files)
+                {
+                    Dictionary<string,object> fileDict = new Dictionary<string, object>();
+                    fileDict["path"] = f.Path.Split(Path.DirectorySeparatorChar).Select(x => (object)Encoding.UTF8.GetBytes(x)).ToList();
+                    fileDict["length"] = f.Size;
+                    files.Add(fileDict);
+                }
+
+                dict["files"] = files;
+                dict["name"] = Encoding.UTF8.GetBytes(torrent.FileDirectory.Substring(0, torrent.FileDirectory.Length - 1));
+            }
+            return dict;
+        }
+
+        // Decode -- BEncoding to Torrent
+        public static string DecodeUTF8String( object obj)
+        {
+            byte[] bytes = obj as byte[];
+
+            if ( bytes == null)
+                throw new Exception("Unable to decode UTF-8 string, object is not a byte array");
+            return Encoding.UTF8.GetString(bytes);
+        }
+        public static DateTime UnixTimeStampToDateTime(double unixTimeStamp)
+        {
+            System.DateTime dtDateTime = new DateTime(1970, 1, 1,0,0,0,0,System.DateTimeKind.Utc);
+            dtDateTime = dtDateTime.AddSeconds( unixTimeStamp).ToLocalTime();
+            return dtDateTime;
+        }
+
+        private static Torrent BEncodingObjectToTorrent( object bencoding, string name, string downloadPath)
+        {
+            Dictionary<string, object> obj = (Dictionary<string,object>)bencoding;
+
+            if( obj == null)
+                throw new Exception("Not a Torrent File. Try again");
+            
+            // handle lists
+            List<string> trackers = new List<string>();
+            if(obj.ContainsKey("announce"))
+                trackers.Add(DecodeUTF8String(obj["announce"]));
+            
+            if(!obj.ContainsKey("info"))
+                throw new Exception("missing info section");
+            
+            Dictionary<string, object> info = (Dictionary<string,object>)obj["info"];
+
+            if ( info == null)
+                throw new Exception("error");
+            
+            List<FileItem> files = new List<FileItem>();
+
+            if(info.ContainsKey("name") && info.ContainsKey("length"))
+            {
+                files.Add(new FileItem() {
+                    Path = DecodeUTF8String(info["name"]),
+                    Size = (long)info["length"]
+                });
+            }
+            else if (info.ContainsKey("files"))
+            {
+                long running = 0;
+
+                foreach (object item in (List<object>)info["files"])
+                {
+                    var dict = item as Dictionary<string,object>;
+
+                    if ( dict == null || !dict.ContainsKey("path") || !dict.ContainsKey("length"))
+                        throw new Exception("Error: Incorrent File Specification");
+                    
+                    string path = String.Join(Path.DirectorySeparatorChar.ToString(), ((List<object>)dict["path"]).Select(x => DecodeUTF8String(x)));
+
+                    long size = (long)dict["length"];
+
+                    files.Add(new FileItem()
+                    {
+                        Path = path,
+                        Size = size,
+                        Offset = running
+                    });
+                    
+                    running += size;
+                }
+            }
+            else
+            {
+                throw new Exception("Error: No files specified in torrent");
+            }
+
+            if(!info.ContainsKey("piece length"))
+                throw new Exception("Error");
+            int pieceSize = Convert.ToInt32(info["piece length"]);
+
+            if(!info.ContainsKey("pieces"))
+                throw new Exception("Error");
+            byte[] pieceHashes = (byte[])info["pieces"];
+
+            bool? isPrivate = null;
+            if(!info.ContainsKey("private"))
+                isPrivate = ((long)info["prviate"]) == 1L;
+
+            Torrent torrent = new Torrent(name, downloadPath, files, trackers, pieceSize, pieceHashes, 16384, isPrivate);
+
+            if(obj.ContainsKey("comment"))
+                torrent.Comment = DecodeUTF8String(obj["comment"]);
+            
+            if(obj.ContainsKey("created by"))
+                torrent.CreatedBy = DecodeUTF8String(obj["created by"]);
+
+            if(obj.ContainsKey("creation date"))
+                torrent.CreationDate = UnixTimeStampToDateTime(Convert.ToDouble(obj["creation date"]));
+
+            if(obj.ContainsKey("encoding"))
+                torrent.Encoding = Encoding.GetEncoding(DecodeUTF8String(obj["encoding"]));
+
+            
+            return torrent;
         }
     }
 }
