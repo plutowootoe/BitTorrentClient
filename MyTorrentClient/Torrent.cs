@@ -449,5 +449,60 @@ namespace BitTorrent
             
             return torrent;
         }
+
+        // creating torrent files
+        public static Torrent Create(string path, List<string> trackers =null, int pieceSize = 32768, string comment = "" )
+        {
+            string name = "";
+            List<FileItem> files = new List<FileItem>();
+
+            if(File.Exists(path))
+            {
+                name = Path.GetFileName(path);
+
+                long size = new FileInfo(path).Length;
+                files.Add(new FileItem()
+                {
+                    Path = Path.GetFileName(path),
+                    Size = size
+                });
+            }
+            else 
+            {
+                name = path;
+                string directory = path + Path.DirectorySeparatorChar;
+
+                long running = 0;
+
+                foreach(string file in Directory.EnumerateFiles(path, "*.*", SearchOption.AllDirectories))
+                {
+                    string f = file.Substring(directory.Length);
+
+                    if(f.StartsWith("."))
+                        continue;
+                    
+                    long size = new FileInfo(file).Length;
+
+                    files.Add(new FileItem()
+                        {
+                            Path = f,
+                            Size = size,
+                            Offset = running
+                        });
+                    
+                    running = size;
+                }
+            }
+
+            Torrent torrent = new Torrent(name, "", files, trackers, pieceSize);
+            torrent.Comment = comment;
+            torrent.CreatedBy = "Test Client";
+            torrent.CreatinonDate = DateTime.Now;
+            torrent.Encoding = Encoding.UTF8;
+
+            return torrent;
+        }
+
+        /// Trackers
     }
 }
